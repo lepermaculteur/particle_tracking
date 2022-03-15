@@ -1,87 +1,44 @@
-function [vtracks,ntracks,meanlength,rmslength] = PredictiveTracker(inputnames, bground_name, framerange, bigstrel,threshold,smallstrel,arealim,thresh_focus,max_disp,outputname)
-% Usage: [vtracks,ntracks,meanlength,rmslength] = PredictiveTracker(inputnames,threshold,max_disp,[bground_name],[minarea],[invert],[noisy])
-% Given a movie of particle motions, PredictiveTracker produces Lagrangian
-% particle tracks using a predictive three-frame best-estimate algorithm.
-% The movie must be saved as a series of image files, an image stack in
-% .tif or .gif format, or an uncompressed .avi file; specify the movie in
-% "inputnames" (e.g., '0*.png' or 'stack.tif', or 'movie.avi'). To be
-% identified as a particle, a part of the image must have brightness that
-% differs from the background by at least "threshold". If invert==0,
-% PredictiveTracker seeks particles brighter than the background; if
-% invert==1, PredictiveTracker seeks particles darker than the background;
-% and if invert==-1, PredictiveTracker seeks any sort of contrast. The
-% background is read from the file "bground_name"; see BackgroundImage. If
-% minarea==1, PredictiveTracker seeks single-pixel particles by comparing
-% brightness to adjacent pixels (fast and good for small particles);
-% otherwise PredictiveTracker seeks particles having areas larger than
-% "minarea" (in square pixels; this method is better for tracking large
-% particles). Once identified, each particle is tracked using a kinematic
-% prediction, and a track is broken when no particle lies within "max_disp"
-% pixels of the predicted location. The results are returned in the
-% structure "vtracks", whose fields "len", "X", "Y", "T", "U", and "V"
-% contain the length, horizontal coordinates, vertical coordinates, times,
-% horizontal velocities, and vertical velocities of each track,
-% respectively. If minarea~=1, "vtracks" is returned with an additonal
-% field, "Theta", giving the orientation of the major axis of the particle
-% with respect to the x-axis, in radians. The total number of tracks is
-% returned as "ntracks"; the mean and root-mean-square track lengths are
-% returned in "meanlength" and "rmslength", respectively. If noisy~=0, the
-% movie is repeated with overlaid velocity quivers and the tracks are
-% plotted. If noisy==2, each movie frame is also saved to disk as an image.
-% Requires ParticleFinder.m; also requires read_uncompressed_avi.m for use
-% with .avi movies. This file can be downloaded from
-% http://leviathan.eng.yale.edu/software.
+function [tracks,ntracks,meanlength,rmslength] = PredictiveTracker(inputnames, bground_name, framerange, bigstrel,threshold,smallstrel,arealim,thresh_focus,max_disp,outputname)
+% Usage: [tracks,ntracks,meanlength,rmslength] = PredictiveTracker(inputnames, bground_name, framerange, bigstrel,threshold,smallstrel,arealim,thresh_focus,max_disp,outputname)
 
-% Written by Nicholas T. Ouellette September 2010. 
-% Updated by Douglas H. Kelley 13 April 2011 to plot tracks. 
-% Fixed bug in accounting active tracks 14 April 2011. 
-% Allowed for inputnames and/or bground_name in other directory, 4 May 
-% 2011. 
-% Fixed minor bug providing default input parameters 27 May 2011. 
-% Added movie with overlaid velocity quivers 17 August 2011. 
-% Added "finder" option 18 August 2011. 
-% Changed "finder" to "minarea", added "invert" option, and combined two
-% plots into one 1 September 2011. 
-% Enabled noisy>1 for saving a movie 2 September 2011. 
-% Added "Theta" field (if minarea~=1) 7 September 2011. 
-% Made compatible with uncompressed avi movies (using 
-% read_uncompressed_avi.m) 19 October 2011. 
-% Changed plotting method to use color and show only active tracks, 9 
-% January 2012. 
-% Improved compatibility with images having more than 255 grays, 10 
-% January 2012. 
-% Made compatible with tiff and gif stacks 13 February 2012. 
-% Fixed bugs associated with frames in which no particles are found,
-% 6 March 2012.
-% Offloaded particle finding to ParticleFinder.m, 7 March 2012.
+%Adaptation and extension of original code written by Nicholas T. Ouellette, September 2010
+% 
+% Noticeable add-on (February 2022): 
+% -Added a selection on the eccentricity of the detected regions to decide if they are real particles or not
+% -Implementation of a "in-focus" threshold 
+%   For each particle, a small square sample of 12x12pixels is taken from the background removed image  
+%   (centered on the particle center) and sent to a "focus measurement algorithm" (see 'Helmli and Scherer's 
+%   mean method').If the value returned is below a certain threshold, the particle is considered as 'out of focus' and 
+%   is rejected. The "focus measurement algorithm" has been selected among about twenty other algorithms presented in
+%   "Pertuz et al. / Pattern Recognition (2013)" after being tested on calibration images.
+% -Correction of  minor indexation errors in the initialization and finalization tracking step 
 
 % -=- Set defaults -=-----------------------------------------------------
 framerange_default = [1 inf]; % by default, all frames
 bigstrel_default=5;
 threshold_default=45;
 smallstrel_default=2;
-arealim_default=1; 
+arealim_default=[0 7]; 
 thresh_focus_default=15
-pausetime=1/30; % seconds to pause between frames when plotting
-filterwidth = 1; fitwidth = 0; % parameters for the differentiation kernel
-minarea=arealim(2);
+max_disp_default=2;
+
 % -=- Parse inputs -=-----------------------------------------------------
 if nargin<1
-    error(['Usage: [vtracks,ntracks,meanlength,rmslength] = ' mfilename ...
-        '(inputnames,threshold,max_disp,[bground_name],[minarea],[invert],[noisy])'])
+    error(['Usage: [tracks,ntracks,meanlength,rmslength] = ' mfilename ...
+        '(inputnames, bground_name, framerange, bigstrel,threshold,'...
+        'smallstrel,arealim,thresh_focus,max_disp,outputname)'])
 end
-if ~exist('bground_name','var') || isempty(bground_name)
-    fprintf('Il est où le bhackground freroooo ?!?\n')
+if ~exist('inputnames','var') || isempty(inputnames)
+    fprintf('You should provide a inputnames of your images\n')
     return
 end
-if ~exist('framerange','var') || isempty(framerange)
-    framerange=framerange_default;
+if ~exist('bground_name','var') || isempty(bground_name)
+    fprintf('You should provide a background\n')
+    return
 end
 if ~exist('framerange','var') || isempty(framerange)
     fprintf("No framerange input, framerange set to default :\n")
     framerange=framerange_default
-elseif numel(framerange)==1
-    framerange=framerange*[1 1];
 end
 if ~exist('bigstrel','var') || isempty(bigstrel)
     fprintf("No bigstrel input, bigstrel set to default :\n")
@@ -99,6 +56,14 @@ if ~exist('arealim','var') || isempty(arealim)
     fprintf("No arealim input, arealim set to default :\n")
     arealim=arealim_default;
 end
+if ~exist('thresh_focus','var') || isempty(thresh_focus)
+    fprintf("No thresh_focus input, thresh_focus set to default :\n")
+    thresh_focus=thresh_focus_default;
+end
+if ~exist('max_disp','var') || isempty(max_disp)
+    fprintf("No max_disp input, max_disp set to default :\n")
+    max_disp=max_disp_default;
+end
 if ~exist('output','var') || isempty(output)
     fprintf("No output input, output set to default :\n")
     outputname=0
@@ -112,31 +77,25 @@ if length(ends)>0
   ends(end)=length(t);
 end
 Nf=numel(tt);
-if Nf < (2*fitwidth+1)
+if Nf < 5
 ##    error(['Sorry, found too few files named ' inputnames '.'])
     ntracks=0;
     meanlength=0;
     rmslength=0;
-    vtracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'Area',[],'Eccentricity',[],'Focus',[]),ntracks,1);
+    tracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'Area',[],'Eccentricity',[],'Focus',[]),ntracks,1);
     return
 end
 
 % -=- Set up struct array for tracks -=-----------------------------------
 ind=begins(1):ends(1);
 nparticles = numel(ind);
-if minarea==1
-    tracks = repmat(struct('len',[],'X',[],'Y',[],'T',[]),nparticles,1);
-    for ii = 1:nparticles
-        tracks(ii) = struct('len',1,'X',x(ind(ii)),'Y',y(ind(ii)),'T',1);
-    end
-else
-    tracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'Area',[],'Eccentricity',[],'Focus',[]), ...
-        nparticles,1);
-    for ii = 1:nparticles
-        tracks(ii) = struct('len',1,'X',x(ind(ii)),'Y',y(ind(ii)),'T',1, ...
-            'Area',area(ind(ii)), 'Eccentricity',eccentricity(ind(ii)), 'Focus',focus_mes(ind(ii)));
-    end
+tracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'Area',[],'Eccentricity',[],'Focus',[]), ...
+    nparticles,1);
+for ii = 1:nparticles
+    tracks(ii) = struct('len',1,'X',x(ind(ii)),'Y',y(ind(ii)),'T',1, ...
+        'Area',area(ind(ii)), 'Eccentricity',eccentricity(ind(ii)), 'Focus',focus_mes(ind(ii)));
 end
+
 
 % -=- Keep track of which tracks are active -=----------------------------
 active = 1:nparticles;
@@ -162,12 +121,11 @@ for t = 2:Nf
     else
       fr1=[x(ind) y(ind)];
     end
-      
-    if minarea~=1
-        area_t=area(ind);
-        eccentricity_t=eccentricity(ind);
-        focus_mes_t=focus_mes(ind);
-    end
+     
+    area_t=area(ind);
+    eccentricity_t=eccentricity(ind);
+    focus_mes_t=focus_mes(ind);
+
 
 % -=- Match the tracks with kinematic predictions -=----------------------
 
@@ -232,11 +190,11 @@ for t = 2:Nf
                 tracks(active(ii)).Y(end+1) = fr1(links(ii),2);
                 tracks(active(ii)).len = tracks(active(ii)).len + 1;
                 tracks(active(ii)).T(end+1) = t;
-                if minarea~=1
-                    tracks(active(ii)).Area(end+1) = area_t(links(ii));
-                    tracks(active(ii)).Eccentricity(end+1) = eccentricity_t(links(ii));
-                    tracks(active(ii)).Focus(end+1) = focus_mes_t(links(ii));                    
-                end
+
+                tracks(active(ii)).Area(end+1) = area_t(links(ii));
+                tracks(active(ii)).Eccentricity(end+1) = eccentricity_t(links(ii));
+                tracks(active(ii)).Focus(end+1) = focus_mes_t(links(ii));                    
+
                 matched(links(ii)) = 1;
             end
         end
@@ -244,21 +202,14 @@ for t = 2:Nf
 
         % and start new tracks with the particles in fr1 that found no match
         unmatched = find(matched == 0);
-        if minarea==1
-            newtracks = repmat(struct('len',[],'X',[],'Y',[],'T',[]), ...
-                numel(unmatched),1);
-            for ii = 1:numel(unmatched)
-                newtracks(ii) = struct('len',1,'X',fr1(unmatched(ii),1),...
-                    'Y',fr1(unmatched(ii),2),'T',t);
-            end
-        else
-            newtracks = repmat(struct('len',[],'X',[],'Y',[],'T',[], ...
-                'Area',[], 'Eccentricity',[], 'Focus',[]),numel(unmatched),1);
-            for ii = 1:numel(unmatched)              
-                newtracks(ii) = struct('len',1,'X',fr1(unmatched(ii),1),...
-                    'Y',fr1(unmatched(ii),2),'T',t,'Area',area_t(unmatched(ii)),'Eccentricity',eccentricity_t(unmatched(ii)), 'Focus',focus_mes_t(unmatched(ii)));
-            end
+        
+        newtracks = repmat(struct('len',[],'X',[],'Y',[],'T',[], ...
+            'Area',[], 'Eccentricity',[], 'Focus',[]),numel(unmatched),1);
+        for ii = 1:numel(unmatched)              
+            newtracks(ii) = struct('len',1,'X',fr1(unmatched(ii),1),...
+                'Y',fr1(unmatched(ii),2),'T',t,'Area',area_t(unmatched(ii)),'Eccentricity',eccentricity_t(unmatched(ii)), 'Focus',focus_mes_t(unmatched(ii)));
         end
+        
     else % if nfr1>0
         active=[];
         newtracks=[];
@@ -281,56 +232,23 @@ end
 
 % -=- Prune tracks that are too short -=----------------------------------
 disp('Pruning...');
-##tracks = tracks([tracks.len] >= (2*fitwidth+1));
 tracks = tracks([tracks.len] >= 5);
 ntracks = numel(tracks);
 meanlength = mean([tracks.len]);
 rmslength = sqrt(mean([tracks.len].^2));
 
-% -=- Compute velocities -=-----------------------------------------------
-disp('Differentiating...');
-
-% define the convolution kernel
-##Av = 1.0/(0.5*filterwidth^2 * ...
-##    (sqrt(pi)*filterwidth*erf(fitwidth/filterwidth) - ...
-##    2*fitwidth*exp(-fitwidth^2/filterwidth^2)));
-##vkernel = -fitwidth:fitwidth;
-##vkernel = Av.*vkernel.*exp(-vkernel.^2./filterwidth^2);
 
 % loop over tracks
-if minarea==1
-    vtracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'U',[],'V',[]),ntracks,1);
-else
-##    vtracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'U',[], ...
-##        'V',[],'Theta',[]),ntracks,1);
-    vtracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'Area',[],'Eccentricity',[],'Focus',[]),ntracks,1);
-end
+tracks = repmat(struct('len',[],'X',[],'Y',[],'T',[],'Area',[],'Eccentricity',[],'Focus',[]),ntracks,1);
+
 for ii = 1:ntracks
-##    u = -conv(tracks(ii).X,vkernel,'valid');
-##    v = -conv(tracks(ii).Y,vkernel,'valid');
-    if minarea==1
-        vtracks(ii) = struct('len',tracks(ii).len - 2*fitwidth, ...
-            'X',tracks(ii).X(fitwidth+1:end-fitwidth), ...
-            'Y',tracks(ii).Y(fitwidth+1:end-fitwidth), ...
-            'T',tracks(ii).T(fitwidth+1:end-fitwidth), ...
-            'U',u, ...
-            'V',v);
-    else
-##        vtracks(ii) = struct('len',tracks(ii).len - 2*fitwidth, ...
-##            'X',tracks(ii).X(fitwidth+1:end-fitwidth), ...
-##            'Y',tracks(ii).Y(fitwidth+1:end-fitwidth), ...
-##            'T',tracks(ii).T(fitwidth+1:end-fitwidth), ...
-##            'U',u, ...
-##            'V',v, ...
-##            'Theta',tracks(ii).Theta(fitwidth+1:end-fitwidth));
-        vtracks(ii) = struct('len',tracks(ii).len - 2*fitwidth, ...
-            'X',tracks(ii).X(fitwidth+1:end-fitwidth), ...
-            'Y',tracks(ii).Y(fitwidth+1:end-fitwidth), ...
-            'T',tracks(ii).T(fitwidth+1:end-fitwidth), ...
-            'Area',tracks(ii).Area(fitwidth+1:end-fitwidth), ...
-            'Eccentricity',tracks(ii).Eccentricity(fitwidth+1:end-fitwidth), ...
-            'Focus',tracks(ii).Focus(fitwidth+1:end-fitwidth));
-    end
+  tracks(ii) = struct('len',tracks(ii).len - 2*0, ...
+      'X',tracks(ii).X, ...
+      'Y',tracks(ii).Y, ...
+      'T',tracks(ii).T, ...
+      'Area',tracks(ii).Area, ...
+      'Eccentricity',tracks(ii).Eccentricity, ...
+      'Focus',tracks(ii).Focus);
 end
 disp('Done.')
 
